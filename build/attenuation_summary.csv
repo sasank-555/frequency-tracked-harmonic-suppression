@@ -1,0 +1,5 @@
+harmonic_index,nominal_freq,static_attenuation_db,tracked_attenuation_db
+1,50.0,61.41,51.97
+2,100.0,46.58,45.76
+3,150.0,53.21,35.93
+4,200.0,21.14,10.83
