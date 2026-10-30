@@ -10,20 +10,29 @@
  * 
  * ALL-IN-ONE STANDALONE EMBEDDED C SOURCE FILE: run_me.c
  * 
- * ARCHITECTURAL DESIGN HIGHLIGHTS:
- *   1. ALL ARRAYS ARE GLOBAL VARIABLES:
- *      Every data buffer, sample array, Goertzel table, FIR state line, and
- *      metric vector is allocated at GLOBAL scope in the DSP's .bss memory.
- *      - Zero bytes allocated on the runtime stack (eliminates stack overflow).
- *      - Zero bytes allocated on dynamic heap (eliminates malloc failure).
- *      - All arrays are directly inspectable in Code Composer Studio (CCS)
- *        Expressions window and Tools -> Graph view (Time/Frequency).
- *   2. NATIVE HARDWARE FPU:
- *      Single-precision float (32-bit) maps directly to the C674x single-cycle
- *      VLIW floating-point instructions.
- *   3. ACTIVE CIO STREAM FLUSHING:
- *      Uses explicit fflush(stdout) and a live progress indicator [25%..100%]
- *      so execution never appears frozen in CCS Console.
+ * ============================================================================
+ * GLOBAL ARRAYS FOR DIRECT CCS GRAPHING & PLOTTING:
+ * ----------------------------------------------------------------------------
+ * All working arrays are declared as TOP-LEVEL GLOBAL VARIABLES with clear,
+ * self-describing names. In Code Composer Studio (CCS), she can directly open
+ * 'Tools -> Graph -> Single Time' or 'Dual Time' and type these exact names:
+ * 
+ *  1. time_seconds_array[]                 -> Time axis in seconds (0.0 to 2.0s)
+ *  2. clean_reference_signal[]             -> Clean ground-truth information signal
+ *  3. corrupted_input_signal[]             -> Input corrupted with 50Hz hum & harmonics
+ *  4. filtered_output_tracked[]            -> Output of proposed frequency-tracked FIR
+ *  5. filtered_output_static[]             -> Output of baseline static notch filter
+ *  6. residual_error_signal[]              -> Error between filtered output & clean signal
+ *  7. true_fundamental_frequency_hz[]      -> True drifting interference trajectory f0(t)
+ *  8. estimated_fundamental_frequency_hz[] -> Goertzel real-time estimated frequency
+ *  9. frequency_tracking_error_hz[]        -> Tracking error |f0_true - f0_est|
+ * 10. harmonic_center_frequencies_hz[]     -> Nominal harmonic frequencies [50, 100, 150, 200]
+ * 11. tracked_harmonic_attenuation_db[]    -> Measured attenuation per harmonic (Proposed)
+ * 12. static_harmonic_attenuation_db[]     -> Measured attenuation per harmonic (Static)
+ * 13. fir_tracked_filter_taps[]            -> 151-tap linear-phase FIR impulse response
+ * 14. fir_static_filter_taps[]             -> 151-tap static notch impulse response
+ * 15. goertzel_scan_candidate_powers[]     -> Computed spectral power per candidate bin
+ * 16. goertzel_scan_candidate_frequencies_hz[] -> Candidate frequency bins (46.5 to 53.5 Hz)
  * ============================================================================
  */
 
@@ -69,41 +78,47 @@ typedef enum {
 } dsp_status_t;
 
 /* ============================================================================
- * 2. ALL ARRAYS DECLARED AT GLOBAL SCOPE (Zero Malloc / Zero Stack Overhead)
- *    These arrays are visible in CCS Expressions & Graph Windows.
+ * 2. SELF-EXPLANATORY GLOBAL ARRAYS (For Direct Graphing & CCS Inspection)
  * ============================================================================ */
 
-/* --- Signal Simulation & Streaming Buffers --- */
-dsp_real_t clean_sig[TOTAL_SAMPLES];            /* Ground truth clean information signal */
-dsp_real_t noisy_input[TOTAL_SAMPLES];          /* Input corrupted with drifting harmonics & noise */
-dsp_real_t true_f0[TOTAL_SAMPLES];              /* True instantaneous fundamental frequency f0(t) */
-dsp_real_t out_tracked[TOTAL_SAMPLES];          /* Proposed system output (drifting harmonics removed) */
-dsp_real_t est_f0_vec[TOTAL_SAMPLES];           /* Goertzel real-time estimated frequency trajectory */
-dsp_real_t out_static[TOTAL_SAMPLES];           /* Baseline static notch filter output */
+/* --- Time Domain Signal Waveforms (For CCS Graph -> Single Time / Dual Time) --- */
+dsp_real_t time_seconds_array[TOTAL_SAMPLES];                 /* Time vector [0.000s, 0.001s, ..., 1.999s] */
+dsp_real_t clean_reference_signal[TOTAL_SAMPLES];             /* Original clean signal without interference */
+dsp_real_t corrupted_input_signal[TOTAL_SAMPLES];             /* Input: Clean + Drifting Harmonics + Noise */
+dsp_real_t filtered_output_tracked[TOTAL_SAMPLES];            /* Output of proposed frequency-tracked system */
+dsp_real_t filtered_output_static[TOTAL_SAMPLES];             /* Output of baseline non-tracking static notch */
+dsp_real_t residual_error_signal[TOTAL_SAMPLES];              /* Residual error: |filtered_output - clean_signal| */
 
-/* --- Goertzel Algorithm & Frequency Tracker Working Buffers --- */
-dsp_real_t goertzel_window[GOERTZEL_MAX_BLOCK_SIZE];        /* Precomputed Hamming analysis window */
-dsp_real_t goertzel_sample_buffer[GOERTZEL_MAX_BLOCK_SIZE]; /* Sliding analysis sample buffer */
-dsp_real_t candidate_freqs[GOERTZEL_MAX_CANDIDATE_BINS];    /* Frequency search grid bins (Hz) */
-dsp_real_t candidate_coeffs[GOERTZEL_MAX_CANDIDATE_BINS];   /* Goertzel recurrence coefficients: 2*cos(w) */
-dsp_real_t goertzel_powers[GOERTZEL_MAX_CANDIDATE_BINS];    /* Computed spectral power per candidate bin */
+/* --- Frequency Tracking Trajectory Curves (For CCS Tracking Accuracy Plots) --- */
+dsp_real_t true_fundamental_frequency_hz[TOTAL_SAMPLES];      /* True drifting f0(t) [50.0 +/- 1.5 Hz] */
+dsp_real_t estimated_fundamental_frequency_hz[TOTAL_SAMPLES]; /* Goertzel real-time estimated frequency curve */
+dsp_real_t frequency_tracking_error_hz[TOTAL_SAMPLES];        /* Instantaneous tracking error |f0_true - f0_est| */
 
-/* --- FIR Notch Filter Coefficient & Delay-Line Buffers --- */
-dsp_real_t fir_tracked_coeffs[MAX_FIR_TAPS];    /* Dynamically retuned linear-phase FIR coefficients */
-dsp_real_t fir_tracked_state[MAX_FIR_TAPS];     /* Delay-line state buffer for tracked FIR */
-dsp_real_t fir_static_coeffs[MAX_FIR_TAPS];     /* Baseline static filter coefficients (nominal 50 Hz) */
-dsp_real_t fir_static_state[MAX_FIR_TAPS];      /* Delay-line state buffer for static filter */
-dsp_real_t h_bp_total[MAX_FIR_TAPS];            /* Summed multi-harmonic bandpass sinc buffer */
-dsp_real_t h_bp[MAX_FIR_TAPS];                  /* Single-harmonic modulated sinc buffer */
+/* --- Harmonic Attenuation & Spectrum Evaluation (For Attenuation Bar Charts) --- */
+dsp_real_t harmonic_center_frequencies_hz[NUM_HARMONICS];     /* [50.0 Hz, 100.0 Hz, 150.0 Hz, 200.0 Hz] */
+dsp_real_t tracked_harmonic_attenuation_db[NUM_HARMONICS];    /* Attenuation achieved by proposed system (dB) */
+dsp_real_t static_harmonic_attenuation_db[NUM_HARMONICS];     /* Attenuation achieved by static filter (dB) */
 
-/* --- Signal Synthesizer & Performance Evaluation Buffers --- */
-dsp_real_t harmonic_phases[MAX_HARMONICS];      /* Initial phase offsets for harmonic overtones */
-dsp_real_t att_static[NUM_HARMONICS];           /* Measured attenuation per harmonic (static filter) */
-dsp_real_t att_tracked[NUM_HARMONICS];          /* Measured attenuation per harmonic (proposed system) */
-dsp_real_t report_harmonic_att_db[MAX_HARMONICS]; /* Formatted per-harmonic attenuation report vector */
+/* --- Goertzel Spectrum Analysis Buffers (For Spectrum Waterfall / Grid Scan) --- */
+dsp_real_t goertzel_scan_candidate_frequencies_hz[GOERTZEL_MAX_CANDIDATE_BINS]; /* Search frequency bins (Hz) */
+dsp_real_t goertzel_scan_candidate_powers[GOERTZEL_MAX_CANDIDATE_BINS];         /* Power spectrum across bins */
+dsp_real_t goertzel_recurrence_coefficients[GOERTZEL_MAX_CANDIDATE_BINS];       /* 2*cos(2*pi*f/fs) per candidate */
+dsp_real_t goertzel_analysis_window[GOERTZEL_MAX_BLOCK_SIZE];                   /* Precomputed Hamming window */
+dsp_real_t goertzel_sliding_sample_buffer[GOERTZEL_MAX_BLOCK_SIZE];             /* Sliding input sample window */
+
+/* --- FIR Notch Filter Impulse Response (For Filter Tap & Bode Response Plots) --- */
+dsp_real_t fir_tracked_filter_taps[MAX_FIR_TAPS];             /* 151-tap adaptive FIR impulse response h[n] */
+dsp_real_t fir_tracked_filter_delay_line[MAX_FIR_TAPS];       /* Circular delay-line state for tracked FIR */
+dsp_real_t fir_static_filter_taps[MAX_FIR_TAPS];              /* 151-tap static notch impulse response */
+dsp_real_t fir_static_filter_delay_line[MAX_FIR_TAPS];        /* Circular delay-line state for static FIR */
+dsp_real_t fir_bandpass_sum_buffer[MAX_FIR_TAPS];             /* Summed multi-bandpass sinc buffer */
+dsp_real_t fir_single_bandpass_buffer[MAX_FIR_TAPS];          /* Modulated bandpass sinc prototype buffer */
+
+/* --- Signal Synthesizer Phase Offsets --- */
+dsp_real_t synthesizer_harmonic_phases[MAX_HARMONICS];        /* Relative phases of harmonic overtones */
 
 /* ============================================================================
- * 3. CONTEXT STRUCTURES (Points to Global Arrays)
+ * 3. CONTEXT STRUCTURES (Linking Directly to Global Arrays)
  * ============================================================================ */
 
 typedef struct {
@@ -121,14 +136,14 @@ typedef struct {
 
 typedef struct {
     dsp_real_t *coeffs;
-    dsp_real_t *state_buffer;
+    dsp_real_t *delay_line;
     uint16_t    num_taps;
     uint16_t    buffer_index;
     dsp_real_t  sample_rate;
     dsp_real_t  notch_bandwidth;
     uint8_t     num_harmonics;
     dsp_real_t  current_f0;
-} fir_windowed_notch_t;
+} fir_notch_filter_t;
 
 typedef struct {
     dsp_real_t           sample_rate;
@@ -142,7 +157,7 @@ typedef struct {
     dsp_real_t           smoothing_alpha;
     uint16_t             analysis_block_size;
     goertzel_tracker_t   tracker;
-    fir_windowed_notch_t filter;
+    fir_notch_filter_t   filter;
     dsp_real_t           active_f0;
     uint16_t             group_delay;
     bool                 is_initialized;
@@ -227,7 +242,7 @@ dsp_status_t goertzel_tracker_init(
 
     /* Precompute global Hamming analysis window */
     for (uint16_t i = 0; i < block_size && i < GOERTZEL_MAX_BLOCK_SIZE; i++) {
-        goertzel_window[i] = 0.54f - 0.46f * cosf(TWO_PI * (dsp_real_t)i / (dsp_real_t)(block_size - 1));
+        goertzel_analysis_window[i] = 0.54f - 0.46f * cosf(TWO_PI * (dsp_real_t)i / (dsp_real_t)(block_size - 1));
     }
 
     /* Initialize global candidate frequency grid */
@@ -239,13 +254,13 @@ dsp_status_t goertzel_tracker_init(
     uint16_t count = 0;
     for (dsp_real_t f = f_min; f <= f_max + 1e-4f; f += step_hz) {
         if (count >= GOERTZEL_MAX_CANDIDATE_BINS) break;
-        candidate_freqs[count] = f;
+        goertzel_scan_candidate_frequencies_hz[count] = f;
         dsp_real_t omega = TWO_PI * f / sample_rate;
-        candidate_coeffs[count] = 2.0f * cosf(omega);
+        goertzel_recurrence_coefficients[count] = 2.0f * cosf(omega);
         count++;
     }
     tracker->num_candidates = count;
-    memset(goertzel_sample_buffer, 0, sizeof(goertzel_sample_buffer));
+    memset(goertzel_sliding_sample_buffer, 0, sizeof(goertzel_sliding_sample_buffer));
     return DSP_OK;
 }
 
@@ -262,11 +277,11 @@ dsp_real_t goertzel_tracker_analyze_block(
     int best_idx = 0;
 
     for (uint16_t c = 0; c < tracker->num_candidates; c++) {
-        dsp_real_t coeff = candidate_coeffs[c];
+        dsp_real_t coeff = goertzel_recurrence_coefficients[c];
         dsp_real_t s_prev1 = 0.0f, s_prev2 = 0.0f;
 
         for (uint16_t i = 0; i < num_samples; i++) {
-            dsp_real_t sw = block[i] * goertzel_window[i];
+            dsp_real_t sw = block[i] * goertzel_analysis_window[i];
             dsp_real_t s0 = sw + coeff * s_prev1 - s_prev2;
             s_prev2 = s_prev1;
             s_prev1 = s0;
@@ -274,7 +289,7 @@ dsp_real_t goertzel_tracker_analyze_block(
 
         dsp_real_t p = (s_prev1 * s_prev1) + (s_prev2 * s_prev2) - (coeff * s_prev1 * s_prev2);
         if (p < 0.0f) p = 0.0f;
-        goertzel_powers[c] = p;
+        goertzel_scan_candidate_powers[c] = p;
 
         if (p > max_p) {
             max_p = p;
@@ -283,11 +298,11 @@ dsp_real_t goertzel_tracker_analyze_block(
     }
 
     /* Sub-Bin Parabolic Peak Interpolation */
-    dsp_real_t raw_f0 = candidate_freqs[best_idx];
+    dsp_real_t raw_f0 = goertzel_scan_candidate_frequencies_hz[best_idx];
     if (best_idx > 0 && best_idx < (int)tracker->num_candidates - 1) {
-        dsp_real_t p_left  = goertzel_powers[best_idx - 1];
-        dsp_real_t p_mid   = goertzel_powers[best_idx];
-        dsp_real_t p_right = goertzel_powers[best_idx + 1];
+        dsp_real_t p_left  = goertzel_scan_candidate_powers[best_idx - 1];
+        dsp_real_t p_mid   = goertzel_scan_candidate_powers[best_idx];
+        dsp_real_t p_right = goertzel_scan_candidate_powers[best_idx + 1];
 
         dsp_real_t denom = p_left - 2.0f * p_mid + p_right;
         if (fabsf(denom) > 1e-9f) {
@@ -312,12 +327,12 @@ dsp_real_t goertzel_tracker_feed_sample(
     if (f0_updated) *f0_updated = false;
     if (!tracker || !tracker->is_initialized) return 0.0f;
 
-    goertzel_sample_buffer[tracker->buffer_index++] = sample;
+    goertzel_sliding_sample_buffer[tracker->buffer_index++] = sample;
 
     if (tracker->buffer_index >= tracker->block_size) {
         goertzel_tracker_analyze_block(
             tracker,
-            goertzel_sample_buffer,
+            goertzel_sliding_sample_buffer,
             tracker->block_size
         );
 
@@ -326,8 +341,8 @@ dsp_real_t goertzel_tracker_feed_sample(
         uint16_t remaining = tracker->block_size - shift;
 
         memmove(
-            goertzel_sample_buffer,
-            &goertzel_sample_buffer[shift],
+            goertzel_sliding_sample_buffer,
+            &goertzel_sliding_sample_buffer[shift],
             remaining * sizeof(dsp_real_t)
         );
         tracker->buffer_index = remaining;
@@ -340,7 +355,7 @@ dsp_real_t goertzel_tracker_feed_sample(
  * 5. LINEAR-PHASE FIR NOTCH FILTER IMPLEMENTATION
  * ============================================================================ */
 
-void fir_windowed_update_frequency(fir_windowed_notch_t *filter, dsp_real_t new_f0) {
+void fir_windowed_update_frequency(fir_notch_filter_t *filter, dsp_real_t new_f0) {
     if (!filter || new_f0 <= 0.0f) return;
     filter->current_f0 = new_f0;
 
@@ -351,7 +366,7 @@ void fir_windowed_update_frequency(fir_windowed_notch_t *filter, dsp_real_t new_
     dsp_real_t fc = B / (2.0f * fs);
     dsp_real_t nyquist = fs / 2.0f;
 
-    memset(h_bp_total, 0, sizeof(h_bp_total));
+    memset(fir_bandpass_sum_buffer, 0, sizeof(fir_bandpass_sum_buffer));
 
     for (uint8_t k = 1; k <= filter->num_harmonics; k++) {
         dsp_real_t fk = (dsp_real_t)k * new_f0;
@@ -364,14 +379,14 @@ void fir_windowed_update_frequency(fir_windowed_notch_t *filter, dsp_real_t new_
             dsp_real_t h_lp = 2.0f * fc * sinc_f(2.0f * fc * m);
             dsp_real_t cos_mod = 2.0f * cosf(TWO_PI * fk * m / fs);
             dsp_real_t w = blackman_win_f(n, M);
-            h_bp[n] = h_lp * cos_mod * w;
-            g_k += h_bp[n] * cosf(TWO_PI * fk * m / fs);
+            fir_single_bandpass_buffer[n] = h_lp * cos_mod * w;
+            g_k += fir_single_bandpass_buffer[n] * cosf(TWO_PI * fk * m / fs);
         }
 
         if (fabsf(g_k) > 1e-6f) {
             dsp_real_t inv_g = 1.0f / g_k;
             for (uint16_t n = 0; n < M; n++) {
-                h_bp_total[n] += (h_bp[n] * inv_g);
+                fir_bandpass_sum_buffer[n] += (fir_single_bandpass_buffer[n] * inv_g);
             }
         }
     }
@@ -379,28 +394,28 @@ void fir_windowed_update_frequency(fir_windowed_notch_t *filter, dsp_real_t new_
     for (uint16_t n = 0; n < M; n++) {
         dsp_real_t m = (dsp_real_t)n - tau;
         dsp_real_t delta = (fabsf(m) < 1e-4f) ? 1.0f : 0.0f;
-        filter->coeffs[n] = delta - h_bp_total[n];
+        filter->coeffs[n] = delta - fir_bandpass_sum_buffer[n];
     }
 }
 
 dsp_status_t fir_windowed_init(
-    fir_windowed_notch_t *filter,
+    fir_notch_filter_t *filter,
     dsp_real_t *coeff_array,
-    dsp_real_t *state_array,
+    dsp_real_t *delay_line_array,
     dsp_real_t sample_rate,
     uint16_t num_taps,
     dsp_real_t notch_bandwidth,
     dsp_real_t initial_f0,
     uint8_t num_harmonics
 ) {
-    if (!filter || !coeff_array || !state_array || sample_rate <= 0.0f || num_taps == 0 || initial_f0 <= 0.0f) {
+    if (!filter || !coeff_array || !delay_line_array || sample_rate <= 0.0f || num_taps == 0 || initial_f0 <= 0.0f) {
         return DSP_ERROR_INVALID_PARAM;
     }
     if (num_taps > MAX_FIR_TAPS) num_taps = MAX_FIR_TAPS;
     if (num_taps % 2 == 0) num_taps++;
 
     filter->coeffs = coeff_array;
-    filter->state_buffer = state_array;
+    filter->delay_line = delay_line_array;
     filter->sample_rate = sample_rate;
     filter->num_taps = num_taps;
     filter->notch_bandwidth = notch_bandwidth;
@@ -409,19 +424,19 @@ dsp_status_t fir_windowed_init(
     filter->buffer_index = 0;
 
     fir_windowed_update_frequency(filter, initial_f0);
-    memset(filter->state_buffer, 0, num_taps * sizeof(dsp_real_t));
+    memset(filter->delay_line, 0, num_taps * sizeof(dsp_real_t));
     return DSP_OK;
 }
 
-static inline dsp_real_t fir_windowed_process_sample(fir_windowed_notch_t *filter, dsp_real_t x) {
-    filter->state_buffer[filter->buffer_index] = x;
+static inline dsp_real_t fir_windowed_process_sample(fir_notch_filter_t *filter, dsp_real_t x) {
+    filter->delay_line[filter->buffer_index] = x;
 
     dsp_real_t acc = 0.0f;
     uint16_t idx = filter->buffer_index;
     uint16_t M = filter->num_taps;
 
     for (uint16_t i = 0; i < M; i++) {
-        acc += filter->coeffs[i] * filter->state_buffer[idx];
+        acc += filter->coeffs[i] * filter->delay_line[idx];
         if (idx == 0) idx = M - 1;
         else idx--;
     }
@@ -463,8 +478,8 @@ dsp_status_t suppressor_init(harmonic_suppressor_t *sys) {
 
     st = fir_windowed_init(
         &sys->filter,
-        fir_tracked_coeffs,
-        fir_tracked_state,
+        fir_tracked_filter_taps,
+        fir_tracked_filter_delay_line,
         sys->sample_rate,
         sys->windowed_taps,
         sys->notch_bandwidth_hz,
@@ -514,7 +529,7 @@ void signal_synth_init(signal_synth_t *synth) {
     synth->rng_state = 123456789u;
 
     for (uint8_t k = 0; k < MAX_HARMONICS; k++) {
-        harmonic_phases[k] = (dsp_real_t)k * 0.785398f;
+        synthesizer_harmonic_phases[k] = (dsp_real_t)k * 0.785398f;
     }
 }
 
@@ -538,11 +553,12 @@ synth_sample_output_t signal_synth_step(signal_synth_t *synth) {
     dsp_real_t interf = 0.0f;
     for (uint8_t k = 1; k <= synth->num_harmonics; k++) {
         dsp_real_t amp_k = synth->interference_amp / powf((dsp_real_t)k, 0.75f);
-        dsp_real_t phase_k = (dsp_real_t)k * synth->fundamental_phase + harmonic_phases[k - 1];
+        dsp_real_t phase_k = (dsp_real_t)k * synth->fundamental_phase + synthesizer_harmonic_phases[k - 1];
         interf += amp_k * sinf(phase_k);
     }
     out.interference_sample = interf;
 
+    /* Lightweight Gaussian approximation for noise */
     synth->rng_state = (synth->rng_state * 1664525u + 1013904223u);
     dsp_real_t unif = (dsp_real_t)synth->rng_state / 4294967296.0f;
     dsp_real_t noise = (unif - 0.5f) * 3.464f * synth->noise_stddev;
@@ -593,9 +609,14 @@ int main(int argc, char *argv[]) {
     printf("Nominal Fundamental (f0)  : %.1f Hz (Dynamic Drift: +/-%.2f Hz)\n", NOMINAL_F0, DRIFT_AMP_HZ);
     printf("Suppressed Harmonics      : %u (Fundamental + %u overtones: 50, 100, 150, 200 Hz)\n",
            NUM_HARMONICS, NUM_HARMONICS - 1);
-    printf("Global Storage Mode       : ALL ARRAYS ARE GLOBAL (Zero Malloc / Zero Stack)\n");
+    printf("Memory Storage Mode       : ALL ARRAYS ARE GLOBAL VARIABLES (Zero Malloc / Zero Stack)\n");
     printf("--------------------------------------------------------------------------------\n");
     fflush(stdout);
+
+    /* Populate nominal harmonic center frequencies */
+    for (uint8_t k = 0; k < NUM_HARMONICS; k++) {
+        harmonic_center_frequencies_hz[k] = (dsp_real_t)(k + 1) * NOMINAL_F0;
+    }
 
     /* 1. Initialize Signal Synthesizer */
     signal_synth_t synth;
@@ -606,11 +627,11 @@ int main(int argc, char *argv[]) {
     suppressor_init(&suppressor);
 
     /* 3. Initialize Baseline Static (Non-Tracking) Filter */
-    fir_windowed_notch_t static_filter;
+    fir_notch_filter_t static_filter;
     fir_windowed_init(
         &static_filter,
-        fir_static_coeffs,
-        fir_static_state,
+        fir_static_filter_taps,
+        fir_static_filter_delay_line,
         SIM_SAMPLE_RATE,
         151,
         8.0f,
@@ -627,16 +648,19 @@ int main(int argc, char *argv[]) {
 
     uint32_t step_progress = TOTAL_SAMPLES / 4;
     for (uint32_t i = 0; i < TOTAL_SAMPLES; i++) {
+        time_seconds_array[i] = (dsp_real_t)i / SIM_SAMPLE_RATE;
+
         synth_sample_output_t s = signal_synth_step(&synth);
-        clean_sig[i]   = s.clean_sample;
-        noisy_input[i] = s.composite_sample;
-        true_f0[i]     = s.instantaneous_f0;
+        clean_reference_signal[i]   = s.clean_sample;
+        corrupted_input_signal[i]   = s.composite_sample;
+        true_fundamental_frequency_hz[i] = s.instantaneous_f0;
 
         dsp_real_t f0_trkd = 0.0f;
-        out_tracked[i] = suppressor_process_sample(&suppressor, noisy_input[i], &f0_trkd);
-        est_f0_vec[i]  = f0_trkd;
+        filtered_output_tracked[i] = suppressor_process_sample(&suppressor, corrupted_input_signal[i], &f0_trkd);
+        estimated_fundamental_frequency_hz[i] = f0_trkd;
+        frequency_tracking_error_hz[i] = fabsf(f0_trkd - s.instantaneous_f0);
 
-        out_static[i]  = fir_windowed_process_sample(&static_filter, noisy_input[i]);
+        filtered_output_static[i] = fir_windowed_process_sample(&static_filter, corrupted_input_signal[i]);
 
         if ((i + 1) % step_progress == 0) {
             printf("%u%% ", (unsigned int)(((i + 1) * 100) / TOTAL_SAMPLES));
@@ -650,32 +674,36 @@ int main(int argc, char *argv[]) {
     uint16_t gd = suppressor.group_delay;
     uint32_t valid_n = TOTAL_SAMPLES - gd;
 
+    /* Compute residual error array for time-domain error plotting */
+    for (uint32_t i = 0; i < valid_n; i++) {
+        residual_error_signal[i] = fabsf(filtered_output_tracked[i + gd] - clean_reference_signal[i]);
+    }
+
     dsp_real_t sum_att_tracked = 0.0f, sum_att_static = 0.0f;
 
     for (uint8_t k = 0; k < NUM_HARMONICS; k++) {
-        dsp_real_t fk = (dsp_real_t)(k + 1) * NOMINAL_F0;
-        dsp_real_t p_in   = goertzel_compute_power_block(noisy_input, TOTAL_SAMPLES, fk, SIM_SAMPLE_RATE);
-        dsp_real_t p_trkd = goertzel_compute_power_block(out_tracked, TOTAL_SAMPLES, fk, SIM_SAMPLE_RATE);
-        dsp_real_t p_stat = goertzel_compute_power_block(out_static,  TOTAL_SAMPLES, fk, SIM_SAMPLE_RATE);
+        dsp_real_t fk = harmonic_center_frequencies_hz[k];
+        dsp_real_t p_in   = goertzel_compute_power_block(corrupted_input_signal, TOTAL_SAMPLES, fk, SIM_SAMPLE_RATE);
+        dsp_real_t p_trkd = goertzel_compute_power_block(filtered_output_tracked, TOTAL_SAMPLES, fk, SIM_SAMPLE_RATE);
+        dsp_real_t p_stat = goertzel_compute_power_block(filtered_output_static,  TOTAL_SAMPLES, fk, SIM_SAMPLE_RATE);
 
         if (p_in < 1e-12f) p_in = 1e-12f;
         if (p_trkd < 1e-12f) p_trkd = 1e-12f;
         if (p_stat < 1e-12f) p_stat = 1e-12f;
 
-        att_tracked[k] = 10.0f * log10f(p_in / p_trkd);
-        att_static[k]  = 10.0f * log10f(p_in / p_stat);
-        report_harmonic_att_db[k] = att_tracked[k];
+        tracked_harmonic_attenuation_db[k] = 10.0f * log10f(p_in / p_trkd);
+        static_harmonic_attenuation_db[k]  = 10.0f * log10f(p_in / p_stat);
 
-        sum_att_tracked += att_tracked[k];
-        sum_att_static  += att_static[k];
+        sum_att_tracked += tracked_harmonic_attenuation_db[k];
+        sum_att_static  += static_harmonic_attenuation_db[k];
     }
 
     dsp_real_t avg_att_tracked = sum_att_tracked / (dsp_real_t)NUM_HARMONICS;
     dsp_real_t avg_att_static  = sum_att_static / (dsp_real_t)NUM_HARMONICS;
 
-    dsp_real_t sinad_in_db    = metrics_calculate_sinad_db(noisy_input, clean_sig, valid_n);
-    dsp_real_t sinad_trkd_db  = metrics_calculate_sinad_db(&out_tracked[gd], clean_sig, valid_n);
-    dsp_real_t sinad_stat_db  = metrics_calculate_sinad_db(&out_static[gd], clean_sig, valid_n);
+    dsp_real_t sinad_in_db    = metrics_calculate_sinad_db(corrupted_input_signal, clean_reference_signal, valid_n);
+    dsp_real_t sinad_trkd_db  = metrics_calculate_sinad_db(&filtered_output_tracked[gd], clean_reference_signal, valid_n);
+    dsp_real_t sinad_stat_db  = metrics_calculate_sinad_db(&filtered_output_static[gd], clean_reference_signal, valid_n);
 
     dsp_real_t sinad_imp_trkd = sinad_trkd_db - sinad_in_db;
     dsp_real_t sinad_imp_stat = sinad_stat_db - sinad_in_db;
@@ -683,9 +711,9 @@ int main(int argc, char *argv[]) {
     /* Total Broadband Interference Power Attenuation */
     dsp_real_t p_interf_in = 0.0f, p_res_tracked = 0.0f, p_res_static = 0.0f;
     for (uint32_t i = 0; i < valid_n; i++) {
-        dsp_real_t in_err = noisy_input[i] - clean_sig[i];
-        dsp_real_t trkd_err = out_tracked[i + gd] - clean_sig[i];
-        dsp_real_t stat_err = out_static[i + gd] - clean_sig[i];
+        dsp_real_t in_err = corrupted_input_signal[i] - clean_reference_signal[i];
+        dsp_real_t trkd_err = filtered_output_tracked[i + gd] - clean_reference_signal[i];
+        dsp_real_t stat_err = filtered_output_static[i + gd] - clean_reference_signal[i];
         p_interf_in += in_err * in_err;
         p_res_tracked += trkd_err * trkd_err;
         p_res_static += stat_err * stat_err;
@@ -693,11 +721,11 @@ int main(int argc, char *argv[]) {
     dsp_real_t broadband_att_tracked = 10.0f * log10f(p_interf_in / (p_res_tracked > 1e-9f ? p_res_tracked : 1e-9f));
     dsp_real_t broadband_att_static  = 10.0f * log10f(p_interf_in / (p_res_static > 1e-9f ? p_res_static : 1e-9f));
 
-    /* Frequency Tracking Accuracy */
+    /* Frequency Tracking Accuracy (skipping initial 400 samples of transient) */
     dsp_real_t sum_err = 0.0f, sum_sq_err = 0.0f, max_err = 0.0f;
     uint32_t start_eval = 400;
     for (uint32_t i = start_eval; i < TOTAL_SAMPLES; i++) {
-        dsp_real_t err = fabsf(est_f0_vec[i] - true_f0[i]);
+        dsp_real_t err = frequency_tracking_error_hz[i];
         sum_err += err;
         sum_sq_err += err * err;
         if (err > max_err) max_err = err;
@@ -709,9 +737,9 @@ int main(int argc, char *argv[]) {
     /* Signal Reconstruction Fidelity (RMSE & PRD) */
     dsp_real_t diff_sq = 0.0f, clean_energy = 0.0f;
     for (uint32_t i = 0; i < valid_n; i++) {
-        dsp_real_t diff = clean_sig[i] - out_tracked[i + gd];
+        dsp_real_t diff = clean_reference_signal[i] - filtered_output_tracked[i + gd];
         diff_sq += diff * diff;
-        clean_energy += clean_sig[i] * clean_sig[i];
+        clean_energy += clean_reference_signal[i] * clean_reference_signal[i];
     }
     dsp_real_t clean_rmse = sqrtf(diff_sq / (dsp_real_t)valid_n);
     dsp_real_t prd_pct = sqrtf(diff_sq / (clean_energy > 1e-9f ? clean_energy : 1.0f)) * 100.0f;
@@ -724,9 +752,10 @@ int main(int argc, char *argv[]) {
     printf("| Harmonic | Freq (Nom.) | Static Attenuation(dB)| Tracked Attenuat.(dB)| Gain  |\n");
     printf("+----------+-------------+-----------------------+----------------------+-------+\n");
     for (uint8_t k = 0; k < NUM_HARMONICS; k++) {
-        dsp_real_t fk = (dsp_real_t)(k + 1) * NOMINAL_F0;
+        dsp_real_t fk = harmonic_center_frequencies_hz[k];
         printf("|   k=%u    |  %5.1f Hz   |       %6.2f dB        |      %7.2f dB        | +%.1fdB|\n",
-               k + 1, fk, att_static[k], att_tracked[k], att_tracked[k] - att_static[k]);
+               k + 1, fk, static_harmonic_attenuation_db[k], tracked_harmonic_attenuation_db[k],
+               tracked_harmonic_attenuation_db[k] - static_harmonic_attenuation_db[k]);
     }
     printf("+----------+-------------+-----------------------+----------------------+-------+\n");
     printf("| AVERAGE ATTENUATION    |       %6.2f dB        |      %7.2f dB        | +%.1fdB|\n",
@@ -740,9 +769,9 @@ int main(int argc, char *argv[]) {
     printf("+------------------------+-----------------------+----------------------+-------+\n\n");
 
     printf("--- HARMONIC INTERFERENCE ATTENUATION METRICS ---\n");
-    printf("  * Fundamental (50 Hz) Attenuation:   %6.2f dB  (>99.7%% power reduction)\n", att_tracked[0]);
-    printf("  * 2nd Harmonic (100 Hz) Attenuat.:   %6.2f dB\n", att_tracked[1]);
-    printf("  * 3rd Harmonic (150 Hz) Attenuat.:   %6.2f dB\n", att_tracked[2]);
+    printf("  * Fundamental (50 Hz) Attenuation:   %6.2f dB  (>99.7%% power reduction)\n", tracked_harmonic_attenuation_db[0]);
+    printf("  * 2nd Harmonic (100 Hz) Attenuat.:   %6.2f dB\n", tracked_harmonic_attenuation_db[1]);
+    printf("  * 3rd Harmonic (150 Hz) Attenuat.:   %6.2f dB\n", tracked_harmonic_attenuation_db[2]);
     printf("  * Average Harmonic Attenuation:      %6.2f dB\n", avg_att_tracked);
     printf("  * Total Interference Power Reduced:  %6.2f dB\n", broadband_att_tracked);
 

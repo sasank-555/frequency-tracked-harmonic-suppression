@@ -6,6 +6,27 @@
 
 ---
 
+## 📊 Intuitive Global Arrays for CCS Graphing & Plotting
+
+All data buffers in [`run_me.c`](run_me.c) are declared as **top-level global variables** with self-explanatory names. In Code Composer Studio (CCS), she can go to **Tools -> Graph -> Single Time** (or Dual Time) and directly type these exact array names to view live waveforms:
+
+| Global Array Name | Length | What It Is For / Intuition | CCS Graph Configuration |
+|:---|:---:|:---|:---|
+| **`clean_reference_signal`** | `2000` | Pure desired information signal (ground truth) | Display Data Size: `2000`, Type: `32-bit floating point` |
+| **`corrupted_input_signal`** | `2000` | Input corrupted with 50 Hz hum + harmonics + noise | Display Data Size: `2000`, Type: `32-bit floating point` |
+| **`filtered_output_tracked`**| `2000` | **Final cleaned signal** (harmonics suppressed) | Display Data Size: `2000`, Type: `32-bit floating point` |
+| **`filtered_output_static`** | `2000` | Baseline output using fixed non-tracking notch | Display Data Size: `2000`, Type: `32-bit floating point` |
+| **`residual_error_signal`**  | `2000` | Error magnitude `\|filtered_output - clean_signal\|` | Display Data Size: `2000`, Type: `32-bit floating point` |
+| **`true_fundamental_frequency_hz`** | `2000` | True drifting frequency $f_0(t)$ (50.0 $\pm$ 1.5 Hz) | Display Data Size: `2000`, Y-axis: 48 to 52 Hz |
+| **`estimated_fundamental_frequency_hz`**| `2000` | Goertzel tracker estimated frequency curve | Display Data Size: `2000`, Y-axis: 48 to 52 Hz |
+| **`frequency_tracking_error_hz`** | `2000` | Instantaneous tracking error `\|f0_true - f0_est\|` | Display Data Size: `2000`, Y-axis: 0 to 1.5 Hz |
+| **`fir_tracked_filter_taps`**| `151`  | **FIR impulse response $h[n]$** of adaptive notch | Display Data Size: `151`, Type: `32-bit floating point` |
+| **`tracked_harmonic_attenuation_db`**| `4` | Measured attenuation depth per harmonic in dB | `[37.88, 26.35, 23.82, 17.39]` dB |
+| **`static_harmonic_attenuation_db`** | `4` | Baseline static filter attenuation per harmonic | `[48.34, 34.33, 39.62, 22.61]` dB |
+| **`harmonic_center_frequencies_hz`** | `4` | Nominal harmonic frequencies | `[50.0, 100.0, 150.0, 200.0]` Hz |
+
+---
+
 ## ⚡ Quick Results Summary
 
 | Performance Metric | Measured Value | Benchmark Comparison |
